@@ -2838,6 +2838,9 @@ async function html2pptx(htmlFile, pres, options = {}) {
 
   try {
     const launchOptions = { env: { TMPDIR: tmpDir }, timeout: TIMEOUT_MS };
+    if (process.env.CHROMIUM_EXECUTABLE_PATH) {
+      launchOptions.executablePath = process.env.CHROMIUM_EXECUTABLE_PATH;
+    }
     if (process.platform === 'darwin') {
       launchOptions.channel = 'chrome';
     }

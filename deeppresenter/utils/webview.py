@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -68,9 +69,16 @@ class PlaywrightConverter:
         async with PlaywrightConverter._lock:
             if PlaywrightConverter._browser is None:
                 PlaywrightConverter._playwright = await async_playwright().start()
+                launch_kwargs = {
+                    "headless": True,
+                    "args": LAUNCH_ARGS,
+                }
+                executable_path = os.getenv("CHROMIUM_EXECUTABLE_PATH")
+                if executable_path:
+                    launch_kwargs["executable_path"] = executable_path
                 PlaywrightConverter._browser = (
                     await PlaywrightConverter._playwright.chromium.launch(
-                        headless=True, args=LAUNCH_ARGS
+                        **launch_kwargs
                     )
                 )
 
