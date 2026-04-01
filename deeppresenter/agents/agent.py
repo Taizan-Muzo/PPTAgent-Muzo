@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import uuid
 from abc import abstractmethod
 from collections.abc import AsyncGenerator
@@ -227,6 +228,13 @@ class Agent:
         """This function defines when and how should an agent finish their tasks, combined with outcome check"""
 
     async def execute(self, tool_calls: list[ToolCall]) -> str | list[ChatMessage]:
+        if not tool_calls:
+            recovered = self._fallback_from_plain_text()
+            if recovered is not None:
+                return recovered
+            raise RuntimeError(
+                f"{self.name} agent returned plain text instead of tool calls, and no recoverable outcome was found."
+            )
         coros = []
         observations: list[ChatMessage] = []
         used_tools = set()
@@ -326,6 +334,65 @@ class Agent:
                     f"{self.name} agent exceeded context window: {self.context_length}/{self.context_window}"
                 )
         return observations
+
+    def _fallback_from_plain_text(self) -> str | None:
+        """Recover from providers that occasionally return plain text instead of tool calls."""
+        assistant_msg = self.chat_history[-1]
+        text = assistant_msg.text.strip()
+        if not text:
+            return None
+
+        if self.name != "Research":
+            return None
+
+        md_candidates = [
+            p
+            for p in self.workspace.rglob("*.md")
+            if ".history" not in p.parts and p.is_file()
+        ]
+        if md_candidates:
+            latest_md = max(md_candidates, key=lambda p: p.stat().st_mtime)
+            info(
+                f"{self.name} Agent recovered existing markdown outcome from plain-text turn: {latest_md}"
+            )
+            return str(latest_md)
+
+        manuscript_path = self.workspace / "manuscript.md"
+        manuscript_path.parent.mkdir(parents=True, exist_ok=True)
+        manuscript_path.write_text(
+            self._normalize_research_markdown(text),
+            encoding="utf-8",
+        )
+        info(
+            f"{self.name} Agent converted plain-text response into markdown outcome: {manuscript_path}"
+        )
+        return str(manuscript_path)
+
+    def _normalize_research_markdown(self, text: str) -> str:
+        """Convert a plain-text research answer into a markdown manuscript."""
+        text = text.strip()
+        if "---" in text:
+            return text
+
+        page_sections = re.split(
+            r"(?=^\s{0,3}#{1,6}\s*(?:第\s*\d+\s*页|第\d+页|page\s*\d+))",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        page_sections = [section.strip() for section in page_sections if section.strip()]
+        if len(page_sections) >= 2:
+            return "\n\n---\n\n".join(page_sections)
+
+        numbered_sections = re.split(
+            r"(?=^\s*(?:第\s*\d+\s*页|第\d+页)[:：])",
+            text,
+            flags=re.MULTILINE,
+        )
+        numbered_sections = [section.strip() for section in numbered_sections if section.strip()]
+        if len(numbered_sections) >= 2:
+            return "\n\n---\n\n".join(numbered_sections)
+
+        return text
 
     def log_message(self, msg: ChatMessage):
         if len(msg.text) < MAX_LOGGING_LENGTH:

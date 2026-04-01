@@ -184,8 +184,24 @@ def finalize(outcome: str, agent_name: str = "") -> str:
     """
     # here we conduct some final checks on agent's outcome
     path = Path(outcome)
-    assert path.exists(), f"Outcome {outcome} does not exist"
     if agent_name == "Research":
+        if not path.exists():
+            md_candidates = sorted(
+                [
+                    p
+                    for p in path.parent.glob("*.md")
+                    if p.is_file() and not p.name.startswith(".")
+                ],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if md_candidates:
+                warning(
+                    f"Outcome {outcome} does not exist, fallback to markdown candidate {md_candidates[0]}"
+                )
+                path = md_candidates[0]
+            else:
+                raise AssertionError(f"Outcome {outcome} does not exist")
         md_dir = path.parent
         assert path.suffix == ".md", (
             f"Outcome file should be a markdown file, got {path.suffix}"
@@ -205,6 +221,7 @@ def finalize(outcome: str, agent_name: str = "") -> str:
             warning(f"Failed to rewrite image links: {e}")
 
     elif agent_name == "PPTAgent":
+        assert path.exists(), f"Outcome {outcome} does not exist"
         assert path.is_file() and path.suffix == ".pptx", (
             f"Outcome file should be a pptx file, got {path.suffix}"
         )
@@ -212,12 +229,14 @@ def finalize(outcome: str, agent_name: str = "") -> str:
         if len(prs.slides) <= 0:
             return "PPTX file should contain at least one slide"
     elif agent_name == "Design":
+        assert path.exists(), f"Outcome {outcome} does not exist"
         html_files = list(path.glob("*.html"))
         if len(html_files) <= 0:
             return "Outcome path should be a directory containing HTML files"
         if not all(f.stem.startswith("slide_") for f in html_files):
             return "All HTML files should start with 'slide_'"
     else:
+        assert path.exists(), f"Outcome {outcome} does not exist"
         warning(f"Unverifiable agent: {agent_name}")
 
     if LOCAL_TODO_CSV_PATH.exists():
@@ -226,7 +245,7 @@ def finalize(outcome: str, agent_name: str = "") -> str:
         LOCAL_TODO_LOCK_PATH.unlink()
 
     debug(f"Agent {agent_name} finalized the outcome: {outcome}")
-    return outcome
+    return str(path)
 
 
 if __name__ == "__main__":

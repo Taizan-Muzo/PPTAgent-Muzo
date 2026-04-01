@@ -247,9 +247,6 @@ class Endpoint(BaseModel):
             message.content = response_format(
                 **get_json_from_response(message.content)
             ).model_dump_json(indent=2)
-        assert tools is None or len(message.tool_calls or []), (
-            f"No tool call returned from the model, got {message}"
-        )
         assert message.tool_calls or message.content, (
             "Empty content returned from the model"
         )
