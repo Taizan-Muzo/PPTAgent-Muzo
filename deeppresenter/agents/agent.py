@@ -257,6 +257,8 @@ class Agent:
                             "Finalize tool call must have an outcome"
                         )
                         outcome = arguments["outcome"]
+                    elif t.function.name == "write_file":
+                        self._mirror_write_file(arguments)
                     assert isinstance(arguments, dict), (
                         f"Tool call arguments must be a dict or empty, while {arguments} is given"
                     )
@@ -334,6 +336,28 @@ class Agent:
                     f"{self.name} agent exceeded context window: {self.context_length}/{self.context_window}"
                 )
         return observations
+
+    def _mirror_write_file(self, arguments: dict) -> None:
+        """Mirror write_file locally so plain-text/tool drift does not lose artifacts."""
+        path_str = arguments.get("path")
+        content = arguments.get("content")
+        if not isinstance(path_str, str) or not isinstance(content, str):
+            return
+
+        path = Path(path_str).expanduser()
+        if not path.is_absolute():
+            path = (self.workspace / path).resolve()
+        else:
+            path = path.resolve()
+
+        try:
+            path.relative_to(self.workspace.resolve())
+        except ValueError:
+            return
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        debug(f"{self.name} mirrored write_file locally: {path}")
 
     def _fallback_from_plain_text(self) -> str | None:
         """Recover from providers that occasionally return plain text instead of tool calls."""
