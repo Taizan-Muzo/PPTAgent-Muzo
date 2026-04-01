@@ -1,4 +1,5 @@
 import json
+import re
 import traceback
 import uuid
 from collections.abc import AsyncGenerator
@@ -14,6 +15,96 @@ from deeppresenter.utils.constants import WORKSPACE_BASE
 from deeppresenter.utils.log import debug, error, set_logger, timer, warning
 from deeppresenter.utils.typings import ChatMessage, ConvertType, InputRequest, Role
 from deeppresenter.utils.webview import PlaywrightConverter, convert_html_to_pptx
+
+
+def _latex_to_plain_text(expr: str) -> str:
+    expr = expr.replace("\n", " ").replace("\\\\", " ")
+    while True:
+        updated = re.sub(
+            r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}",
+            r"(\1)/(\2)",
+            expr,
+        )
+        if updated == expr:
+            break
+        expr = updated
+
+    wrappers = [
+        r"text",
+        r"mathrm",
+        r"mathbf",
+        r"mathit",
+        r"hat",
+        r"left",
+        r"right",
+    ]
+    for wrapper in wrappers:
+        expr = re.sub(rf"\\{wrapper}\s*\{{([^{{}}]+)\}}", r"\1", expr)
+
+    greek = {
+        r"\alpha": "α",
+        r"\beta": "β",
+        r"\gamma": "γ",
+        r"\delta": "δ",
+        r"\epsilon": "ε",
+        r"\phi": "φ",
+        r"\psi": "ψ",
+        r"\Psi": "Ψ",
+        r"\lambda": "λ",
+        r"\mu": "μ",
+        r"\sigma": "σ",
+        r"\theta": "θ",
+        r"\omega": "ω",
+        r"\Omega": "Ω",
+        r"\hbar": "ħ",
+        r"\nabla": "∇",
+        r"\partial": "∂",
+        r"\cdot": "·",
+        r"\times": "×",
+        r"\approx": "≈",
+        r"\neq": "≠",
+        r"\geq": "≥",
+        r"\leq": "≤",
+    }
+    for source, target in greek.items():
+        expr = expr.replace(source, target)
+
+    expr = re.sub(r"\\[A-Za-z]+", "", expr)
+    expr = expr.replace("{", "").replace("}", "")
+    expr = re.sub(r"\s+", " ", expr).strip(" $")
+    return expr
+
+
+def _prepare_markdown_for_design(md_file: Path) -> Path:
+    original = md_file.read_text(encoding="utf-8")
+    cleaned = original
+
+    cleaned = re.sub(
+        r"\n*(如果需要进一步调整.*?请告知！?|如果需要进一步调整.*?请告知。?|If you need further adjustments.*?$)",
+        "",
+        cleaned,
+        flags=re.MULTILINE,
+    )
+    cleaned = re.sub(
+        r"\\\[\s*(.*?)\s*\\\]",
+        lambda m: f"\n\n公式：{_latex_to_plain_text(m.group(1))}\n\n",
+        cleaned,
+        flags=re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"\\\(\s*(.*?)\s*\\\)",
+        lambda m: _latex_to_plain_text(m.group(1)),
+        cleaned,
+        flags=re.DOTALL,
+    )
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip() + "\n"
+
+    if cleaned == original:
+        return md_file
+
+    prepared = md_file.with_name(f"{md_file.stem}.design.md")
+    prepared.write_text(cleaned, encoding="utf-8")
+    return prepared
 
 
 class AgentLoop:
@@ -76,6 +167,7 @@ class AgentLoop:
                 self.language,
             )
             self.agent = self.research_agent
+            prepared_md_file = None
             try:
                 async for msg in self.research_agent.loop(request):
                     if isinstance(msg, str):
@@ -83,6 +175,8 @@ class AgentLoop:
                         if not md_file.is_absolute():
                             md_file = self.workspace / md_file
                         self.intermediate_output["manuscript"] = md_file
+                        prepared_md_file = _prepare_markdown_for_design(md_file)
+                        self.intermediate_output["design_manuscript"] = prepared_md_file
                         msg = str(md_file)
                         break
                     yield msg
@@ -104,7 +198,7 @@ class AgentLoop:
                 )
                 self.agent = self.pptagent
                 try:
-                    async for msg in self.pptagent.loop(request, md_file):
+                    async for msg in self.pptagent.loop(request, prepared_md_file):
                         if isinstance(msg, str):
                             pptx_file = Path(msg)
                             if not pptx_file.is_absolute():
@@ -132,7 +226,7 @@ class AgentLoop:
                 )
                 self.agent = self.designagent
                 try:
-                    async for msg in self.designagent.loop(request, md_file):
+                    async for msg in self.designagent.loop(request, prepared_md_file):
                         if isinstance(msg, str):
                             slide_html_dir = Path(msg)
                             if not slide_html_dir.is_absolute():

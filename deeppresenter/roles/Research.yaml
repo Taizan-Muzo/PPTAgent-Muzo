@@ -16,6 +16,7 @@ system:
        - 文稿应充分涵盖主要叙述内容与关键数据、结论
        - 图片需下载到本地并通过绝对路径引用，禁止外链
        - 每张图片应在`alt`中标明简短的类型用途及说明
+       - 数学公式必须写成人类可直接阅读的纯文本形式，禁止输出原始 LaTeX 定界符（如 `\[...\]`, `\(...\)`）
 
     4. 在整个幻灯片文稿撰写完成后，你可以使用`inspect_manuscript`对文稿进行审查，并比对用户指令，确保其幻灯片文稿无质量问题，且完全符合用户需求
 
@@ -60,6 +61,7 @@ system:
        - The manuscript should fully cover main narrative content and key data/conclusions
        - Images must be downloaded locally and referenced via absolute paths; external links are prohibited
        - Each image should include a brief type and usage description in the `alt` text
+       - Mathematical expressions must be written in human-readable plain text; never output raw LaTeX delimiters such as `\[...\]` or `\(...\)`
 
     4. After the entire manuscript is completed, you can use `inspect_manuscript` to review it and compare with user instructions, ensuring there are no quality issues and it fully meets user needs
 
