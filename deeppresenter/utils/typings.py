@@ -50,13 +50,18 @@ class MCPServer(BaseModel):
 
     def _process_text(self, text: str) -> dict:
         """Process environment variables in config"""
-        match = re.findall(r"\$([A-Z][A-Z_]*[A-Z])", text)
-        for m in match:
+        match = set(re.findall(r"\$\{([A-Z][A-Z_]*[A-Z])\}|\$([A-Z][A-Z_]*[A-Z])", text))
+        for brace_var, plain_var in match:
+            m = brace_var or plain_var
             if m in os.environ:
-                text = text.replace(f"${m}", os.environ[m])
+                text = text.replace(f"${{{m}}}", os.environ[m]).replace(
+                    f"${m}", os.environ[m]
+                )
                 debug(f"Escaping {m} to {os.environ[m]}")
             elif m in self.env:
-                text = text.replace(f"${m}", self.env[m])
+                text = text.replace(f"${{{m}}}", self.env[m]).replace(
+                    f"${m}", self.env[m]
+                )
                 debug(f"Escaping {m} to {self.env[m]}")
             else:
                 raise ValueError(f"Environment variable {m} declared but not found")

@@ -1,12 +1,16 @@
 import asyncio
+import base64
 import json
+import os
 import random
 from itertools import cycle, product
 from pathlib import Path
 from typing import Any
 
+import httpx
 import json_repair
 import yaml
+from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 from openai.types.images_response import ImagesResponse
@@ -20,6 +24,48 @@ from deeppresenter.utils.constants import (
     RETRY_TIMES,
 )
 from deeppresenter.utils.log import debug, logging_openai_exceptions
+
+
+def load_local_dotenv(config_path: str | Path | None = None) -> None:
+    """Load .env files near the project/config before parsing yaml/json configs."""
+    candidates: list[Path] = []
+    if config_path:
+        config_file = Path(config_path).expanduser().resolve()
+        candidates.extend(
+            [
+                config_file.parent / ".env",
+                config_file.parent.parent / ".env",
+            ]
+        )
+    candidates.extend(
+        [
+            PACKAGE_DIR / ".env",
+            PACKAGE_DIR.parent / ".env",
+            Path.cwd() / ".env",
+        ]
+    )
+
+    visited = set()
+    for env_file in candidates:
+        try:
+            env_file = env_file.resolve()
+        except FileNotFoundError:
+            continue
+        if env_file in visited or not env_file.exists():
+            continue
+        load_dotenv(env_file, override=False)
+        visited.add(env_file)
+
+
+def _expand_env_vars(value: Any) -> Any:
+    """Recursively expand ${VAR} placeholders using the current environment."""
+    if isinstance(value, dict):
+        return {k: _expand_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars(v) for v in value]
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    return value
 
 
 def get_json_from_response(response: str) -> dict | list:
@@ -82,6 +128,10 @@ class Endpoint(BaseModel):
     sampling_parameters: dict[str, Any] = Field(
         default_factory=dict, description="Sampling parameters"
     )
+    protocol: str = Field(
+        default="openai",
+        description="Endpoint protocol override for non-standard providers",
+    )
     _client: AsyncOpenAI = PrivateAttr()
 
     def model_post_init(self, _) -> None:
@@ -90,6 +140,74 @@ class Endpoint(BaseModel):
             base_url=self.base_url,
             **self.client_kwargs,
         )
+
+    async def generate_image(self, prompt: str, width: int, height: int) -> ImagesResponse:
+        if self.protocol == "openai":
+            response = await self._client.images.generate(
+                prompt=prompt,
+                model=self.model,
+                size=f"{width}x{height}",
+                timeout=MCP_CALL_TIMEOUT // 5,
+                **self.sampling_parameters,
+            )
+            assert len(response.data) >= 1, (
+                f"Expected at least an image response, got {response}"
+            )
+            return response
+
+        if self.protocol == "dashscope_multimodal_generation":
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": self.model,
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"text": prompt}],
+                        }
+                    ]
+                },
+                "parameters": {"n": 1, **self.sampling_parameters},
+            }
+            async with httpx.AsyncClient(timeout=MCP_CALL_TIMEOUT // 5) as client:
+                response = await client.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                result = response.json()
+
+            output = result.get("output", {})
+            image_url = None
+            if output.get("choices"):
+                content = output["choices"][0].get("message", {}).get("content", [])
+                if content:
+                    image_url = content[0].get("image")
+            elif output.get("results"):
+                image_url = output["results"][0].get("url")
+            else:
+                image_url = output.get("url")
+
+            assert image_url, f"Unable to parse image generation response: {result}"
+            async with httpx.AsyncClient(timeout=MCP_CALL_TIMEOUT // 5) as client:
+                image_resp = await client.get(image_url)
+                image_resp.raise_for_status()
+            return ImagesResponse.model_validate(
+                {
+                    "created": 0,
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(image_resp.content).decode("utf-8")
+                        }
+                    ],
+                }
+            )
+
+        raise ValueError(f"Unsupported image generation protocol: {self.protocol}")
 
     async def call(
         self,
@@ -144,6 +262,9 @@ class LLM(BaseModel):
     base_url: str | None = Field(default=None, description="API base URL")
     model: str | None = Field(default=None, description="Model name")
     api_key: str | None = Field(default=None, description="API key")
+    protocol: str = Field(
+        default="openai", description="Endpoint protocol override for non-standard providers"
+    )
     identifier: str | None = Field(
         default=None,
         description="Optional identifier for the model instance, this will override property `model_name`",
@@ -195,6 +316,7 @@ class LLM(BaseModel):
                     base_url=self.base_url,
                     model=self.model,
                     api_key=self.api_key,
+                    protocol=self.protocol,
                     client_kwargs=self.client_kwargs,
                     sampling_parameters=self.sampling_parameters,
                 ),
@@ -274,17 +396,7 @@ class LLM(BaseModel):
                 # t2i is stateless
                 endpoint = self._endpoints[retry_idx % len(self._endpoints)]
                 try:
-                    response = await endpoint._client.images.generate(
-                        prompt=prompt,
-                        model=endpoint.model,
-                        size=f"{width}x{height}",
-                        timeout=MCP_CALL_TIMEOUT // 5,
-                        **endpoint.sampling_parameters,
-                    )
-                    assert len(response.data) >= 1, (
-                        f"Expected at least an image response, got {response}"
-                    )
-                    return response
+                    return await endpoint.generate_image(prompt, width, height)
 
                 except (AssertionError, ValidationError) as e:
                     errors.append(f"[{endpoint.model}] {e}")
@@ -363,6 +475,7 @@ class DeepPresenterConfig(BaseModel):
     @classmethod
     def load_from_file(cls, config_path: str | None = None) -> "DeepPresenterConfig":
         """Load configuration from file"""
+        load_local_dotenv(config_path)
         if config_path:
             config_file = Path(config_path)
         else:
@@ -373,6 +486,7 @@ class DeepPresenterConfig(BaseModel):
         config_data = {}
         with open(config_file, encoding="utf-8") as f:
             config_data = yaml.safe_load(f) or {}
+        config_data = _expand_env_vars(config_data)
 
         config_data["file_path"] = str(config_file.resolve())
         return cls(**config_data)
